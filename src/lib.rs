@@ -114,7 +114,7 @@ fn parse_bytes(buf: &[u8]) -> Result<usize, Error> {
 }
 
 /// Simple ratio structure since stdlib lacks one.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Ratio {
     /// Numerator.
     pub num: usize,
@@ -132,6 +132,14 @@ impl Ratio {
 impl fmt::Display for Ratio {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}:{}", self.num, self.den)
+    }
+}
+
+impl From<(usize, usize)> for Ratio {
+    fn from(values: (usize, usize)) -> Self {
+        let num = values.0;
+        let den = values.1;
+        Self { num, den }
     }
 }
 
@@ -498,8 +506,7 @@ impl EncoderBuilder {
         self
     }
 
-    /// Write header to the stream and create encoder instance.
-    pub fn write_header<W: Write>(self, writer: &mut W) -> Result<Encoder<W>, Error> {
+    fn init_header<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
         // XXX(Kagami): Beware that FILE_MAGICK already contains space.
         writer.write_all(FILE_MAGICK)?;
         write!(
@@ -509,6 +516,12 @@ impl EncoderBuilder {
         )?;
         write!(writer, " {:?}", self.colorspace)?;
         writer.write_all(&[TERMINATOR])?;
+        Ok(())
+    }
+
+    /// Write header to the stream and create encoder instance.
+    pub fn write_header<W: Write>(self, writer: &mut W) -> Result<Encoder<W>, Error> {
+        self.init_header(writer)?;
         let (y_len, u_len, v_len) = get_plane_sizes(self.width, self.height, self.colorspace);
         Ok(Encoder {
             writer,
@@ -517,6 +530,28 @@ impl EncoderBuilder {
             v_len,
         })
     }
+
+    /// Write header to the stream and create an encoder instance that takes
+    /// ownership of a writer.
+    pub fn write_header_owned<W: Write>(self, writer: W) -> Result<OwnedEncoder<W>, Error> {
+        let mut writer = writer;
+        self.init_header(&mut writer)?;
+        let (y_len, u_len, v_len) = get_plane_sizes(self.width, self.height, self.colorspace);
+        Ok(OwnedEncoder {
+            writer,
+            y_len,
+            u_len,
+            v_len,
+        })
+    }
+}
+
+/// YUV4MPEG2 encoder that owns a writer.
+pub struct OwnedEncoder<W: Write> {
+    writer: W,
+    y_len: usize,
+    u_len: usize,
+    v_len: usize,
 }
 
 /// YUV4MPEG2 encoder.
@@ -525,6 +560,28 @@ pub struct Encoder<'e, W: Write + 'e> {
     y_len: usize,
     u_len: usize,
     v_len: usize,
+}
+
+impl<W: Write> OwnedEncoder<W> {
+    /// Write next frame to the stream.
+    pub fn write_frame(&mut self, frame: &Frame) -> Result<(), Error> {
+        if frame.get_y_plane().len() != self.y_len
+            || frame.get_u_plane().len() != self.u_len
+            || frame.get_v_plane().len() != self.v_len
+        {
+            return Err(Error::BadInput);
+        }
+        self.writer.write_all(FRAME_MAGICK)?;
+        if let Some(params) = frame.get_raw_params() {
+            self.writer.write_all(&[FIELD_SEP])?;
+            self.writer.write_all(params)?;
+        }
+        self.writer.write_all(&[TERMINATOR])?;
+        self.writer.write_all(frame.get_y_plane())?;
+        self.writer.write_all(frame.get_u_plane())?;
+        self.writer.write_all(frame.get_v_plane())?;
+        Ok(())
+    }
 }
 
 impl<'e, W: Write> Encoder<'e, W> {
